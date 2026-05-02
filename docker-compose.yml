@@ -1,0 +1,10 @@
+services:
+  web:
+    image: nginx:alpine
+    container_name: madtec-web
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "[::]:80:80"
+    volumes:
+      - ./www:/usr/share/nginx/html:ro
