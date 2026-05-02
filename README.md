@@ -39,6 +39,43 @@ sudo certbot certonly \
 
 ---
 
+## Router configuration
+
+This setup relies on IPv6 since residential IPv4 is typically behind CG-NAT. Your router must expose the server's IPv6 address to the internet.
+
+### IPv6 host exposure
+
+Find the setting in your router under **Firewall → IPv6 → Host Exposure** (name varies by vendor) and expose **all TCP+UDP ports** to your server's IPv6 address:
+
+```
+Address:  2a00:xxxx:xxxx:xxxx:xxxx:xxxx:xxxx:xxxx   ← your server's stable IPv6
+Subnet:   /64
+Protocol: TCP + UDP
+Ports:    ALL  (or at minimum 80, 443, and any TCP ports you proxy)
+```
+
+To find your server's stable IPv6:
+
+```bash
+ip -6 addr show scope global | grep -v temporary | grep -oP 'inet6 \K[0-9a-f:]+(?=/)'
+```
+
+> **Note:** The `2a00:…` prefix is assigned by your ISP and can change when your router reboots or renews its prefix delegation. The DynDNS timer handles updating DNS automatically, but you will need to update the router's host exposure entry with the new address if the prefix changes.
+
+### Common router UIs
+
+| Router | Path |
+|---|---|
+| Fritz!Box | Internet → Freigaben → IPv6-Freigaben |
+| Vodafone EasyBox | Firewall → IPv6 → Host-Freigabe |
+| Generic | Firewall → IPv6 Firewall → Inbound rules |
+
+### IPv4
+
+IPv4 inbound will only work if your ISP gives you a dedicated public IPv4 (not CG-NAT). If `curl -4 https://api.ipify.org` returns the same IP as your router's WAN address and you can set up port forwarding, add rules for ports 80 and 443. Otherwise, IPv6 is the only inbound path.
+
+---
+
 ## Add a subdomain
 
 ```bash
