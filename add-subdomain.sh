@@ -6,8 +6,6 @@ CF_API="https://api.cloudflare.com/client/v4"
 NGINX_AVAILABLE="/etc/nginx/sites-available"
 NGINX_ENABLED="/etc/nginx/sites-enabled"
 NGINX_STREAM="/etc/nginx/stream.conf.d"
-CERT="/etc/letsencrypt/live/madtec.org/fullchain.pem"
-KEY="/etc/letsencrypt/live/madtec.org/privkey.pem"
 
 usage() {
     echo "Usage: $0 <subdomain> <port|tcp:port> [--remove]"
@@ -20,7 +18,14 @@ usage() {
 SUB="$1"
 ARG="$2"
 REMOVE="${3:-}"
-FQDN="${SUB}.madtec.org"
+
+[[ -f "$ENV_FILE" ]] || { echo ".env not found: $ENV_FILE" >&2; exit 1; }
+source "$ENV_FILE"
+
+ZONE_ID="$CF_ZONE_ID"
+FQDN="${SUB}.${DOMAIN}"
+CERT="/etc/letsencrypt/live/${DOMAIN}/fullchain.pem"
+KEY="/etc/letsencrypt/live/${DOMAIN}/privkey.pem"
 
 # Parse tcp:PORT vs plain PORT
 if [[ "$ARG" == tcp:* ]]; then
@@ -30,9 +35,6 @@ else
     MODE="http"
     PORT="$ARG"
 fi
-
-source "$ENV_FILE"
-ZONE_ID="$CF_ZONE_ID"
 
 cf_api() {
     local method=$1 path=$2 data=${3:-}
@@ -70,9 +72,10 @@ EXISTING=$(cf_api GET "/zones/${ZONE_ID}/dns_records?type=CNAME&name=${FQDN}" \
 
 if [[ "$EXISTING" -eq 0 ]]; then
     RESP=$(cf_api POST "/zones/${ZONE_ID}/dns_records" \
-        "$(jq -nc --arg n "$FQDN" '{"type":"CNAME","name":$n,"content":"madtec.org","ttl":60,"proxied":false}')")
+        "$(jq -nc --arg n "$FQDN" --arg d "$DOMAIN" \
+            '{"type":"CNAME","name":$n,"content":$d,"ttl":60,"proxied":false}')")
     echo "$RESP" | jq -e '.success' > /dev/null
-    echo "DNS CNAME created: $FQDN → madtec.org"
+    echo "DNS CNAME created: $FQDN → $DOMAIN"
 else
     echo "DNS CNAME already exists, skipping"
 fi
@@ -130,5 +133,4 @@ server {
 EOF
     sudo nginx -t && sudo systemctl reload nginx
     echo "Done — ${FQDN}:${PORT} → localhost:${PORT} (TCP)"
-    echo "Note: connect with  psql -h ${FQDN} -p ${PORT} ..."
 fi

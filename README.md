@@ -1,4 +1,4 @@
-# madtec.org — DynDNS + Subdomain Manager
+# your-domain\.com — DynDNS + Subdomain Manager
 
 Self-hosted dynamic DNS with automatic subdomain provisioning via Cloudflare and nginx on Ubuntu 24.04.
 
@@ -16,7 +16,7 @@ cp .env.example .env
 # .env
 CF_TOKEN="your-cloudflare-api-token"   # Zone:DNS:Edit permission
 CF_ZONE_ID="your-zone-id"              # Cloudflare dashboard → domain overview → right sidebar
-DOMAIN="madtec.org"
+DOMAIN="your-domain\.com"
 IFACE="wlxec750c68b7ce"                # interface with your public IPv6 (ip addr show)
 ```
 
@@ -34,7 +34,7 @@ This copies the scripts to `/usr/local/bin/`, creates cache/log dirs, and enable
 sudo certbot certonly \
   --dns-cloudflare \
   --dns-cloudflare-credentials /etc/letsencrypt/cloudflare/madtec.ini \
-  -d madtec.org -d '*.madtec.org'
+  -d your-domain\.com -d '*.your-domain\.com'
 ```
 
 ---
@@ -79,10 +79,10 @@ IPv4 inbound will only work if your ISP gives you a dedicated public IPv4 (not C
 ## Add a subdomain
 
 ```bash
-# HTTP reverse proxy  →  https://app.madtec.org  proxies to localhost:3000
+# HTTP reverse proxy  →  https://app.your-domain\.com  proxies to localhost:3000
 bash add-subdomain.sh app 3000
 
-# TCP passthrough  →  db.madtec.org:5432  routes to localhost:5432
+# TCP passthrough  →  db.your-domain\.com:5432  routes to localhost:5432
 bash add-subdomain.sh db tcp:5432
 
 # Remove
@@ -110,5 +110,5 @@ Each call: creates a Cloudflare CNAME, writes an nginx config, reloads nginx.
 systemctl list-timers cloudflare-dyndns.timer
 journalctl -u cloudflare-dyndns.service -f
 tail -f /var/log/cloudflare-dyndns.log
-tail -f /var/log/nginx/madtec.org.access.log
+tail -f /var/log/nginx/your-domain\.com.access.log
 ```
