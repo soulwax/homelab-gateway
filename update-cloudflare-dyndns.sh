@@ -1,16 +1,54 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ENV_FILE="$(dirname "$0")/.env"
 CF_API="https://api.cloudflare.com/client/v4"
 CACHE_FILE="/var/cache/cloudflare-dyndns/last_ips"
 LOG_FILE="/var/log/cloudflare-dyndns.log"
 
-[[ -f "$ENV_FILE" ]] || { echo ".env not found: $ENV_FILE" >&2; exit 1; }
-source "$ENV_FILE"
-ZONE_ID="$CF_ZONE_ID"
-
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" | tee -a "$LOG_FILE"; }
+
+load_config() {
+    local script_dir env_file legacy_file
+    script_dir="$(cd "$(dirname "$0")" && pwd)"
+    env_file="${script_dir}/.env"
+    legacy_file="${script_dir}/cloudflare-dyndns.conf"
+
+    if [[ -f "$env_file" ]]; then
+        # shellcheck source=/dev/null
+        source "$env_file"
+    elif [[ -f "$legacy_file" ]]; then
+        # shellcheck source=/dev/null
+        source "$legacy_file"
+        : "${CF_ZONE_ID:=${ZONE_ID:-}}"
+    else
+        echo "Config not found. Expected ${env_file} or ${legacy_file}" >&2
+        exit 1
+    fi
+
+    : "${CF_TOKEN:?CF_TOKEN is required}"
+    : "${CF_ZONE_ID:?CF_ZONE_ID is required}"
+    : "${DOMAIN:?DOMAIN is required}"
+    : "${IFACE:?IFACE is required}"
+    ZONE_ID="$CF_ZONE_ID"
+}
+
+detect_ipv6() {
+    ip -6 -o addr show dev "$IFACE" scope global 2>/dev/null \
+        | awk '
+            $0 !~ / temporary / &&
+            $0 !~ / deprecated / &&
+            $0 !~ / tentative / &&
+            $0 !~ / dadfailed / {
+                split($4, cidr, "/")
+                if (cidr[1] !~ /^(fd|fc)/) {
+                    print cidr[1]
+                    exit
+                }
+            }
+        '
+}
+
+load_config
 
 cf_api() {
     local method=$1 path=$2 data=${3:-}
@@ -59,12 +97,8 @@ upsert_record() {
 # Public IPv4 (behind NAT, must use external lookup)
 IPV4=$(curl -4 -s --max-time 10 https://api.ipify.org 2>/dev/null || true)
 
-# Stable public IPv6 (non-temporary, non-ULA)
-IPV6=$(ip -6 addr show dev "$IFACE" scope global 2>/dev/null \
-    | grep -v "temporary" \
-    | grep -oP 'inet6 \K[0-9a-f:]+(?=/)' \
-    | grep -vE '^(fd|fc)' \
-    | head -1 || true)
+# Stable public IPv6 (non-temporary, non-deprecated, non-ULA)
+IPV6=$(detect_ipv6 || true)
 
 [[ -z "$IPV4" && -z "$IPV6" ]] && { log "ERROR: no IP detected"; exit 1; }
 

@@ -9,10 +9,15 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 command -v jq &>/dev/null || apt-get install -y jq
 
 install -m 700 "$SCRIPT_DIR/update-cloudflare-dyndns.sh" /usr/local/bin/update-cloudflare-dyndns.sh
-install -m 600 "$SCRIPT_DIR/cloudflare-dyndns.conf"      /usr/local/bin/cloudflare-dyndns.conf
 
-sed -i 's|CONF_FILE="$(dirname "$0")/cloudflare-dyndns.conf"|CONF_FILE="/usr/local/bin/cloudflare-dyndns.conf"|' \
-    /usr/local/bin/update-cloudflare-dyndns.sh
+if [[ -f "$SCRIPT_DIR/.env" ]]; then
+    install -m 600 "$SCRIPT_DIR/.env" /usr/local/bin/.env
+elif [[ -f "$SCRIPT_DIR/cloudflare-dyndns.conf" ]]; then
+    install -m 600 "$SCRIPT_DIR/cloudflare-dyndns.conf" /usr/local/bin/cloudflare-dyndns.conf
+else
+    echo "No Cloudflare config found. Create .env or cloudflare-dyndns.conf first." >&2
+    exit 1
+fi
 
 mkdir -p /var/cache/cloudflare-dyndns
 touch /var/log/cloudflare-dyndns.log

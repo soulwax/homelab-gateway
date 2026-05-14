@@ -1,114 +1,215 @@
-# your-domain\.com — DynDNS + Subdomain Manager
+# DynDNS + Subdomain Manager
 
-Self-hosted dynamic DNS with automatic subdomain provisioning via Cloudflare and nginx on Ubuntu 24.04.
+Self-hosted dynamic DNS and subdomain provisioning for a server behind a residential connection. Cloudflare is the primary DNS provider path; Strato support remains as a legacy updater.
 
-## Setup
+The Cloudflare path keeps the root domain's A and AAAA records current, then `add-subdomain.sh` can create subdomains that point back to the root domain and route traffic through nginx.
 
-### 1. Configure credentials
+## Requirements
 
-Copy the example and fill in your values:
+- Ubuntu or another systemd-based Linux host
+- `bash`, `curl`, `iproute2`, and `jq`
+- nginx for the root site and generated subdomain proxy configs
+- A Cloudflare API token with DNS edit access for the zone
+- A global IPv6 address on the server interface if IPv6 inbound is your main path
+- Optional: certbot wildcard certificate for HTTPS subdomains
+
+`install-cloudflare.sh` installs `jq` with `apt-get` if it is missing.
+
+## Configure Cloudflare
+
+Copy the example config and fill in real values:
 
 ```bash
 cp .env.example .env
 ```
 
 ```ini
-# .env
-CF_TOKEN="your-cloudflare-api-token"   # Zone:DNS:Edit permission
-CF_ZONE_ID="your-zone-id"              # Cloudflare dashboard → domain overview → right sidebar
-DOMAIN="your-domain\.com"
-IFACE="wlxec750c68b7ce"                # interface with your public IPv6 (ip addr show)
+CF_TOKEN="your-cloudflare-api-token"
+CF_ZONE_ID="your-zone-id"
+DOMAIN="yourdomain.tld"
+IFACE="your-network-interface"
+CF_CREDENTIALS="/etc/letsencrypt/cloudflare/yourdomain.ini"
 ```
 
-### 2. Install the DynDNS timer
+Required variables for the updater are `CF_TOKEN`, `CF_ZONE_ID`, `DOMAIN`, and `IFACE`.
+
+To find the interface name:
+
+```bash
+ip route get 1.1.1.1
+ip -6 addr show scope global
+```
+
+Keep `.env` private. The installer copies it to `/usr/local/bin/.env` for the systemd service.
+
+## Install The Cloudflare DynDNS Timer
+
+Run from the repository root:
 
 ```bash
 sudo bash install-cloudflare.sh
 ```
 
-This copies the scripts to `/usr/local/bin/`, creates cache/log dirs, and enables a systemd timer that updates DNS every 15 minutes.
+The installer:
 
-### 3. Wildcard SSL cert (one-time)
+- copies `update-cloudflare-dyndns.sh` to `/usr/local/bin/`
+- copies `.env` to `/usr/local/bin/.env`
+- falls back to `cloudflare-dyndns.conf` if `.env` does not exist
+- creates `/var/cache/cloudflare-dyndns/last_ips` on first run
+- logs to `/var/log/cloudflare-dyndns.log`
+- installs and enables `cloudflare-dyndns.timer`
+- starts one immediate update through `cloudflare-dyndns.service`
 
-```bash
-sudo certbot certonly \
-  --dns-cloudflare \
-  --dns-cloudflare-credentials /etc/letsencrypt/cloudflare/madtec.ini \
-  -d your-domain\.com -d '*.your-domain\.com'
-```
+The timer runs every 15 minutes and is persistent across reboots.
 
----
-
-## Router configuration
-
-This setup relies on IPv6 since residential IPv4 is typically behind CG-NAT. Your router must expose the server's IPv6 address to the internet.
-
-### IPv6 host exposure
-
-Find the setting in your router under **Firewall → IPv6 → Host Exposure** (name varies by vendor) and expose **all TCP+UDP ports** to your server's IPv6 address:
-
-```
-Address:  2a00:xxxx:xxxx:xxxx:xxxx:xxxx:xxxx:xxxx   ← your server's stable IPv6
-Subnet:   /64
-Protocol: TCP + UDP
-Ports:    ALL  (or at minimum 80, 443, and any TCP ports you proxy)
-```
-
-To find your server's stable IPv6:
-
-```bash
-ip -6 addr show scope global | grep -v temporary | grep -oP 'inet6 \K[0-9a-f:]+(?=/)'
-```
-
-> **Note:** The `2a00:…` prefix is assigned by your ISP and can change when your router reboots or renews its prefix delegation. The DynDNS timer handles updating DNS automatically, but you will need to update the router's host exposure entry with the new address if the prefix changes.
-
-### Common router UIs
-
-| Router | Path |
-|---|---|
-| Fritz!Box | Internet → Freigaben → IPv6-Freigaben |
-| Vodafone EasyBox | Firewall → IPv6 → Host-Freigabe |
-| Generic | Firewall → IPv6 Firewall → Inbound rules |
-
-### IPv4
-
-IPv4 inbound will only work if your ISP gives you a dedicated public IPv4 (not CG-NAT). If `curl -4 https://api.ipify.org` returns the same IP as your router's WAN address and you can set up port forwarding, add rules for ports 80 and 443. Otherwise, IPv6 is the only inbound path.
-
----
-
-## Add a subdomain
-
-```bash
-# HTTP reverse proxy  →  https://app.your-domain\.com  proxies to localhost:3000
-bash add-subdomain.sh app 3000
-
-# TCP passthrough  →  db.your-domain\.com:5432  routes to localhost:5432
-bash add-subdomain.sh db tcp:5432
-
-# Remove
-bash add-subdomain.sh app 3000 --remove
-```
-
-Each call: creates a Cloudflare CNAME, writes an nginx config, reloads nginx.
-
----
-
-## File overview
-
-| File | Purpose |
-|---|---|
-| `.env` | Credentials — **never commit** |
-| `update-cloudflare-dyndns.sh` | Updates A + AAAA records when IP changes |
-| `add-subdomain.sh` | Provisions/removes subdomains |
-| `cloudflare-dyndns.service/timer` | systemd units (15-min DynDNS updates) |
-| `install-cloudflare.sh` | One-time install of the timer |
-| `www/` | Static site served at the root domain |
-
-## Monitoring
+## Verify DynDNS
 
 ```bash
 systemctl list-timers cloudflare-dyndns.timer
 journalctl -u cloudflare-dyndns.service -f
 tail -f /var/log/cloudflare-dyndns.log
-tail -f /var/log/nginx/your-domain\.com.access.log
 ```
+
+The updater detects:
+
+- public IPv4 with `curl -4 https://api.ipify.org`
+- public IPv6 from `IFACE`, ignoring temporary, deprecated, tentative, failed, and ULA addresses
+
+If the combined IP string has not changed, it skips Cloudflare API calls.
+
+## Root Static Site
+
+`www/` contains the static root site.
+
+For nginx on the host, adapt and install `madtec.nginx.conf`:
+
+```bash
+sudo cp madtec.nginx.conf /etc/nginx/sites-available/yourdomain.tld
+sudo ln -sf /etc/nginx/sites-available/yourdomain.tld /etc/nginx/sites-enabled/yourdomain.tld
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+Update the `server_name`, `root`, and log paths in the nginx config if your domain or checkout path differs.
+
+For a simple container serving only `www/` on port 80:
+
+```bash
+docker compose up -d
+```
+
+## Wildcard TLS Certificate
+
+HTTP subdomains generated by `add-subdomain.sh` expect certificate files here:
+
+```text
+/etc/letsencrypt/live/${DOMAIN}/fullchain.pem
+/etc/letsencrypt/live/${DOMAIN}/privkey.pem
+```
+
+One common way to create them is certbot's Cloudflare DNS plugin:
+
+```bash
+sudo certbot certonly \
+  --dns-cloudflare \
+  --dns-cloudflare-credentials "$CF_CREDENTIALS" \
+  -d "$DOMAIN" -d "*.$DOMAIN"
+```
+
+If you run this command from an interactive shell, make sure `DOMAIN` and `CF_CREDENTIALS` are exported or replace them with literal values.
+
+## Add Or Remove Subdomains
+
+HTTP reverse proxy to a local service:
+
+```bash
+bash add-subdomain.sh app 3000
+```
+
+This creates:
+
+- Cloudflare CNAME: `app.$DOMAIN` -> `$DOMAIN`
+- nginx HTTP config: `/etc/nginx/sites-available/app.$DOMAIN`
+- symlink: `/etc/nginx/sites-enabled/app.$DOMAIN`
+- proxy target: `http://127.0.0.1:3000`
+
+TCP passthrough to a local port:
+
+```bash
+bash add-subdomain.sh db tcp:5432
+```
+
+This creates:
+
+- Cloudflare CNAME: `db.$DOMAIN` -> `$DOMAIN`
+- nginx stream config: `/etc/nginx/stream.conf.d/db.$DOMAIN.conf`
+- proxy target: `127.0.0.1:5432`
+
+Your nginx setup must load stream snippets from `/etc/nginx/stream.conf.d/*.conf` for TCP mode.
+
+Remove a subdomain:
+
+```bash
+bash add-subdomain.sh app 3000 --remove
+```
+
+Remove mode deletes the Cloudflare CNAME if present, removes the generated HTTP and TCP nginx configs for that FQDN, validates nginx, and reloads nginx.
+
+## Router And Inbound Access
+
+For many residential connections, IPv4 inbound traffic is blocked by CG-NAT. In that case IPv6 is the reliable inbound path.
+
+Expose the server's global IPv6 address in your router firewall, usually under a menu like:
+
+| Router | Common path |
+|---|---|
+| Fritz!Box | Internet -> Freigaben -> IPv6-Freigaben |
+| Vodafone EasyBox | Firewall -> IPv6 -> Host-Freigabe |
+| Generic | Firewall -> IPv6 Firewall -> Inbound rules |
+
+Expose at least TCP ports 80 and 443 for HTTP/HTTPS. Expose any additional TCP ports you proxy with `tcp:<port>`.
+
+To list stable-looking global IPv6 addresses:
+
+```bash
+ip -6 addr show scope global | grep -v temporary | grep -oP 'inet6 \K[0-9a-f:]+(?=/)'
+```
+
+If your ISP changes the delegated IPv6 prefix, the DynDNS timer updates DNS automatically, but router host exposure rules may still need to be updated to the new address.
+
+## Legacy Strato Updater
+
+Strato support is still present for the older DynDNS path.
+
+Configure `strato-dyndns.conf`, then run:
+
+```bash
+sudo bash install.sh
+```
+
+The installer copies `update-dyndns.sh` and `strato-dyndns.conf` to `/usr/local/bin/`, patches the installed config path, creates `/var/cache/strato-dyndns` and `/var/log/strato-dyndns.log`, enables `strato-dyndns.timer`, and starts one immediate update.
+
+Monitor it with:
+
+```bash
+systemctl list-timers strato-dyndns.timer
+journalctl -u strato-dyndns.service -f
+tail -f /var/log/strato-dyndns.log
+```
+
+## File Overview
+
+| File | Purpose |
+|---|---|
+| `.env.example` | Cloudflare config template |
+| `.env` | Local Cloudflare credentials and runtime config; do not commit real values |
+| `update-cloudflare-dyndns.sh` | Cloudflare A/AAAA updater |
+| `install-cloudflare.sh` | Cloudflare systemd timer installer |
+| `add-subdomain.sh` | Cloudflare CNAME plus nginx subdomain provisioning |
+| `cloudflare-dyndns.service` / `cloudflare-dyndns.timer` | Cloudflare systemd units |
+| `update-dyndns.sh` | Legacy Strato updater |
+| `install.sh` | Legacy Strato systemd timer installer |
+| `strato-dyndns.service` / `strato-dyndns.timer` | Strato systemd units |
+| `madtec.nginx.conf` | Host nginx config for the root static site |
+| `docker-compose.yml` | Containerized nginx for `www/` |
+| `www/` | Static root site assets |
