@@ -177,6 +177,65 @@ ip -6 addr show scope global | grep -v temporary | grep -oP 'inet6 \K[0-9a-f:]+(
 
 If your ISP changes the delegated IPv6 prefix, the DynDNS timer updates DNS automatically, but router host exposure rules may still need to be updated to the new address.
 
+## Troubleshooting
+
+### Stale AAAA, current A
+
+Symptom: `dig +short A <domain>` returns the current home IP but `dig +short AAAA <domain>` returns an old prefix. The Cloudflare log shows lines like:
+
+```
+IPs unchanged (79.199.x.x,), skipping
+```
+
+Note the trailing comma — IPv4 is set, but the IPv6 slot is empty. Root cause is almost always that `$IFACE` in `.env` no longer matches an existing interface. The updater's `detect_ipv6` returns empty when the interface is missing or has no eligible global address, so AAAA is silently never refreshed.
+
+Verify:
+
+```bash
+ip -o link show | awk -F': ' '{print $2}'           # list current interfaces
+ip -6 -o addr show scope global                     # which one has a global v6?
+grep '^IFACE=' /usr/local/bin/.env                  # what the installed script reads
+```
+
+Fix:
+
+```bash
+sudo sed -i 's|^IFACE=.*|IFACE="<correct-iface>"|' /usr/local/bin/.env
+sudo systemctl start cloudflare-dyndns.service
+sudo tail -5 /var/log/cloudflare-dyndns.log
+```
+
+### DNS caches don't match the API
+
+After an update, public resolvers can serve the old record up to the previous TTL. To bypass caches and confirm propagation, query Cloudflare's authoritative nameservers directly:
+
+```bash
+NS=$(dig +short NS <zone> | head -1)
+dig +short @"$NS" A <fqdn>
+dig +short @"$NS" AAAA <fqdn>
+dig +short @"$NS" CNAME <fqdn>
+```
+
+### DNS-only subdomains for raw TCP services
+
+`add-subdomain.sh tcp:<port>` installs an nginx stream proxy on the local host listening on `<port>`. If the target service already binds that port directly (for example a Docker port mapping), nginx will fail to bind and reload. For those cases, add only a DNS CNAME pointing at the root domain so the subdomain inherits the dyndns-managed A/AAAA records:
+
+```bash
+source ./.env
+curl -s -X POST \
+  -H "Authorization: Bearer $CF_TOKEN" \
+  -H "Content-Type: application/json" \
+  "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records" \
+  -d "$(jq -nc --arg n "<sub>.$DOMAIN" --arg c "$DOMAIN" \
+       '{type:"CNAME", name:$n, content:$c, ttl:60, proxied:false}')" | jq .
+```
+
+Clients then connect with `<sub>.<domain>:<port>` and the TCP listener on the host answers directly.
+
+### CNAME points at a Cloudflare Argo Tunnel
+
+If a subdomain was previously set up via `cloudflared`, its CNAME target ends with `.cfargotunnel.com`. Argo Tunnels only forward HTTP/HTTPS, so raw TCP services on that subdomain will fail. Either reconfigure the tunnel for TCP, or repoint the CNAME at the root domain (see the previous section) and let DNS resolve straight to the home IP.
+
 ## Legacy Strato Updater
 
 Strato support is still present for the older DynDNS path.

@@ -81,6 +81,8 @@ Cloudflare:
 3. Cache: `/var/cache/cloudflare-dyndns/last_ips`.
 4. DNS: upsert root-domain A and AAAA records with TTL 60 and `proxied:false`.
 
+Common failure mode: if `$IFACE` no longer exists (e.g. a USB network adapter that was removed), `detect_ipv6` silently returns empty, the cache writes only the v4 part with a trailing comma (`79.199.x.x,`), and AAAA is never refreshed. Cross-check `grep '^IFACE=' /usr/local/bin/.env` against `ip -o link show` and `ip -6 -o addr show scope global` when troubleshooting stale AAAA.
+
 Strato:
 
 1. IPv4: `curl -4 -s --max-time 10 https://api.ipify.org`.
@@ -106,3 +108,4 @@ tail -f /var/log/strato-dyndns.log
 - Preserve current secret handling.
 - Keep the existing systemd and nginx deployment model unless explicitly asked to change it.
 - Verify concrete paths and service names against the scripts before documenting or editing them.
+- Never `cat`, `Read` without filtering, or otherwise echo `.env`, `cloudflare-dyndns.conf`, or `strato-dyndns.conf` to chat or stdout. The token they contain authorizes DNS changes for the whole zone and possibly more. Use `grep -v` or `sed` redaction when inspection is needed. Source the file in a subshell when you need the values for a one-off API call so they live only in process env, not in tool output.

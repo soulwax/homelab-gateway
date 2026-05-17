@@ -110,6 +110,8 @@ Cloudflare updater flow:
 4. Skip Cloudflare API calls when IPs are unchanged.
 5. Create or update root-domain A and AAAA records with TTL 60 and `proxied:false`.
 
+Known failure mode: when `$IFACE` no longer matches an existing interface (e.g. a USB adapter was removed), step 2 silently returns empty, the cache stores a trailing-comma string like `79.199.x.x,`, and AAAA is never refreshed. The log line `IPs unchanged (79.199.x.x,), skipping` is the tell. Cross-check `grep '^IFACE=' /usr/local/bin/.env` against `ip -o link show` and `ip -6 -o addr show scope global`.
+
 Strato updater flow:
 
 1. Fetch public IPv4 with `curl -4 -s --max-time 10 https://api.ipify.org`.
@@ -136,6 +138,7 @@ tail -f /var/log/strato-dyndns.log
 
 - Prefer minimal, targeted shell script and docs changes.
 - Preserve secret-handling behavior and never commit credential values.
+- Never echo `.env`, `cloudflare-dyndns.conf`, or `strato-dyndns.conf` to chat or stdout. The Cloudflare API token in there can edit DNS for the whole zone. Use `grep -v` / `sed` to redact when inspection is needed, or `source` the file inside a subshell so the values stay in process env and never appear in tool output.
 - Do not replace the install flow with a different deployment model unless explicitly requested.
 - Keep Cloudflare and Strato updater behavior aligned when changing shared IP detection or cache semantics.
 - When editing systemd or nginx-related files, verify paths and service names against the existing scripts.
