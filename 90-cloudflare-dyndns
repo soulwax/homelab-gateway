@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# NetworkManager dispatcher hook for Cloudflare DynDNS.
+#
+# Fires the dyndns updater the instant the WAN interface (re)connects or gets a
+# new address, instead of waiting up to a full polling interval. This closes the
+# staleness window after the ISP's daily forced reconnect (which rotates both the
+# IPv4 and the IPv6 prefix). It complements — does not replace — the systemd
+# timer, which remains the safety net.
+#
+# Install: /etc/NetworkManager/dispatcher.d/90-cloudflare-dyndns  (root:root, 0755)
+# NetworkManager calls it as:  <script> <interface> <action>
+#
+# Non-blocking by design: it only kicks the existing oneshot service with
+# `--no-block`, so NetworkManager is never held up by curl/DNS calls, and
+# systemd serialises the unit so it can't overlap a timer-driven run.
+
+interface="$1"
+action="$2"
+
+# Match the configured WAN interface (sourced in a subshell so the CF token in
+# .env never lands in this script's environment). Falls back to eno1.
+iface_match=$( . /usr/local/bin/.env 2>/dev/null; printf '%s' "${IFACE:-eno1}" )
+
+[ "$interface" = "$iface_match" ] || exit 0
+
+case "$action" in
+    up | dhcp4-change | dhcp6-change)
+        systemctl start --no-block cloudflare-dyndns.service
+        ;;
+esac
+
+exit 0

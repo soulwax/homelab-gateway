@@ -33,19 +33,29 @@ load_config() {
 }
 
 detect_ipv6() {
-    ip -6 -o addr show dev "$IFACE" scope global 2>/dev/null \
-        | awk '
-            $0 !~ / temporary / &&
-            $0 !~ / deprecated / &&
-            $0 !~ / tentative / &&
-            $0 !~ / dadfailed / {
-                split($4, cidr, "/")
-                if (cidr[1] !~ /^(fd|fc)/) {
-                    print cidr[1]
-                    exit
+    # Prefer the stable managed address (mngtmpaddr) so AAAA does not flap to a
+    # short-lived privacy address. Retry a few times: right after an ISP forced
+    # reconnect the new address can still be 'tentative' (DAD in progress), which
+    # we must skip — without the retry we'd return empty and leave a stale AAAA.
+    local attempt addr
+    for attempt in 1 2 3 4 5; do
+        addr=$(ip -6 -o addr show dev "$IFACE" scope global 2>/dev/null \
+            | awk '
+                $0 ~ / temporary /  { next }
+                $0 ~ / deprecated / { next }
+                $0 ~ / tentative /  { next }
+                $0 ~ / dadfailed /  { next }
+                {
+                    split($4, cidr, "/")
+                    if (cidr[1] ~ /^(fd|fc)/) next        # skip ULA
+                    if ($0 ~ /mngtmpaddr/) { print cidr[1]; exit }
+                    if (fallback == "") fallback = cidr[1]
                 }
-            }
-        '
+                END { if (fallback != "") print fallback }')
+        [[ -n "$addr" ]] && { printf '%s' "$addr"; return 0; }
+        sleep 2
+    done
+    return 0
 }
 
 load_config
@@ -94,8 +104,21 @@ upsert_record() {
     fi
 }
 
-# Public IPv4 (behind NAT, must use external lookup)
-IPV4=$(curl -4 -s --max-time 10 https://api.ipify.org 2>/dev/null || true)
+# Public IPv4 (behind NAT, must use external lookup). Try several providers and
+# retry: a single provider can be briefly unreachable right after a reconnect,
+# which previously logged "no IP detected" and skipped the cycle.
+detect_ipv4() {
+    local attempt url ip
+    for attempt in 1 2 3; do
+        for url in https://api.ipify.org https://ipv4.icanhazip.com https://v4.ident.me; do
+            ip=$(curl -4 -s --max-time 10 "$url" 2>/dev/null | tr -d '[:space:]')
+            [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && { printf '%s' "$ip"; return 0; }
+        done
+        sleep 2
+    done
+    return 0
+}
+IPV4=$(detect_ipv4 || true)
 
 # Stable public IPv6 (non-temporary, non-deprecated, non-ULA)
 IPV6=$(detect_ipv6 || true)
