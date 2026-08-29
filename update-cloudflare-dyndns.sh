@@ -29,14 +29,14 @@ load_config() {
     : "${CF_ZONE_ID:?CF_ZONE_ID is required}"
     : "${DOMAIN:?DOMAIN is required}"
     : "${IFACE:?IFACE is required}"
+    : "${ADDITIONAL_DOMAINS:=}"
     ZONE_ID="$CF_ZONE_ID"
 }
 
 detect_ipv6() {
     # Prefer the stable managed address (mngtmpaddr) so AAAA does not flap to a
-    # short-lived privacy address. Retry a few times: right after an ISP forced
-    # reconnect the new address can still be 'tentative' (DAD in progress), which
-    # we must skip — without the retry we'd return empty and leave a stale AAAA.
+    # short-lived privacy address. Retry a few times after reconnects while DAD
+    # may still mark the new address tentative.
     local attempt addr
     for attempt in 1 2 3 4 5; do
         addr=$(ip -6 -o addr show dev "$IFACE" scope global 2>/dev/null \
@@ -47,7 +47,7 @@ detect_ipv6() {
                 $0 ~ / dadfailed /  { next }
                 {
                     split($4, cidr, "/")
-                    if (cidr[1] ~ /^(fd|fc)/) next        # skip ULA
+                    if (cidr[1] ~ /^(fd|fc)/) next
                     if ($0 ~ /mngtmpaddr/) { print cidr[1]; exit }
                     if (fallback == "") fallback = cidr[1]
                 }
@@ -71,42 +71,51 @@ cf_api() {
 }
 
 upsert_record() {
-    local type=$1 ip=$2
-    local existing
-    existing=$(cf_api GET "/zones/${ZONE_ID}/dns_records?type=${type}&name=${DOMAIN}")
-
-    local record_id count
+    local zone_id=$1 domain=$2 type=$3 ip=$4
+    local existing record_id count payload resp
+    existing=$(cf_api GET "/zones/${zone_id}/dns_records?type=${type}&name=${domain}")
     record_id=$(echo "$existing" | jq -r '.result[0].id // empty')
-    count=$(echo "$existing"    | jq -r '.result | length')
-
-    local payload
-    payload=$(jq -nc --arg t "$type" --arg n "$DOMAIN" --arg c "$ip" \
+    count=$(echo "$existing" | jq -r '.result | length')
+    payload=$(jq -nc --arg t "$type" --arg n "$domain" --arg c "$ip" \
         '{type:$t, name:$n, content:$c, ttl:60, proxied:false}')
 
     if [[ -z "$record_id" || "$count" -eq 0 ]]; then
-        local resp
-        resp=$(cf_api POST "/zones/${ZONE_ID}/dns_records" "$payload")
+        resp=$(cf_api POST "/zones/${zone_id}/dns_records" "$payload")
         if echo "$resp" | jq -e '.success' > /dev/null; then
-            log "Created $type $ip"
+            log "Created ${domain} $type $ip"
         else
-            log "ERROR creating $type: $(echo "$resp" | jq -r '.errors')"
+            log "ERROR creating ${domain} $type: $(echo "$resp" | jq -r '.errors')"
             return 1
         fi
     else
-        local resp
-        resp=$(cf_api PUT "/zones/${ZONE_ID}/dns_records/${record_id}" "$payload")
+        resp=$(cf_api PUT "/zones/${zone_id}/dns_records/${record_id}" "$payload")
         if echo "$resp" | jq -e '.success' > /dev/null; then
-            log "Updated $type $ip"
+            log "Updated ${domain} $type $ip"
         else
-            log "ERROR updating $type: $(echo "$resp" | jq -r '.errors')"
+            log "ERROR updating ${domain} $type: $(echo "$resp" | jq -r '.errors')"
             return 1
         fi
     fi
 }
 
+managed_domains() {
+    printf '%s:%s\n' "$DOMAIN" "$ZONE_ID"
+
+    local entry domain zone_id
+    for entry in ${ADDITIONAL_DOMAINS//,/ }; do
+        [[ -n "$entry" ]] || continue
+        domain="${entry%%:*}"
+        zone_id="${entry#*:}"
+        if [[ -z "$domain" || -z "$zone_id" || "$domain" == "$zone_id" ]]; then
+            log "ERROR invalid ADDITIONAL_DOMAINS entry: $entry"
+            return 1
+        fi
+        printf '%s:%s\n' "$domain" "$zone_id"
+    done
+}
+
 # Public IPv4 (behind NAT, must use external lookup). Try several providers and
-# retry: a single provider can be briefly unreachable right after a reconnect,
-# which previously logged "no IP detected" and skipped the cycle.
+# retry because a single provider can be briefly unreachable after reconnects.
 detect_ipv4() {
     local attempt url ip
     for attempt in 1 2 3; do
@@ -125,20 +134,25 @@ IPV6=$(detect_ipv6 || true)
 
 [[ -z "$IPV4" && -z "$IPV6" ]] && { log "ERROR: no IP detected"; exit 1; }
 
-MYIP="${IPV4}${IPV4:+,}${IPV6}"   # "v4,v6" or whichever exist
+MYIP="${IPV4}${IPV4:+,}${IPV6}"
+TARGETS=$(managed_domains)
+CACHE_VALUE="${MYIP}|${TARGETS//$'\n'/,}"
 
 mkdir -p "$(dirname "$CACHE_FILE")"
 LAST=$(cat "$CACHE_FILE" 2>/dev/null || true)
 
-if [[ "$LAST" == "$MYIP" ]]; then
+if [[ "$LAST" == "$CACHE_VALUE" ]]; then
     log "IPs unchanged ($MYIP), skipping"
     exit 0
 fi
 
 log "IP change detected: $LAST -> $MYIP"
 
-[[ -n "$IPV4" ]] && upsert_record A    "$IPV4"
-[[ -n "$IPV6" ]] && upsert_record AAAA "$IPV6"
+while IFS=: read -r domain zone_id; do
+    [[ -n "$domain" && -n "$zone_id" ]] || continue
+    [[ -n "$IPV4" ]] && upsert_record "$zone_id" "$domain" A "$IPV4"
+    [[ -n "$IPV6" ]] && upsert_record "$zone_id" "$domain" AAAA "$IPV6"
+done <<< "$TARGETS"
 
-echo "$MYIP" > "$CACHE_FILE"
+echo "$CACHE_VALUE" > "$CACHE_FILE"
 log "Done"
